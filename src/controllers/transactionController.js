@@ -24,7 +24,7 @@ exports.createTransaction = async (req, res, next) => {
       accountId,
       type,
       amount,
-      category,
+      category: type === 'transfer' ? 'Transfer' : category,
       division,
       description,
       date: date || new Date(),
@@ -32,37 +32,17 @@ exports.createTransaction = async (req, res, next) => {
       transferType: type === 'transfer' ? 'transfer_out' : undefined
     });
 
-    // Update account balance
+    // Update account balances atomically using $inc
     if (type === 'income') {
-      account.balance += amount;
+      await Account.findByIdAndUpdate(accountId, { $inc: { balance: amount } });
     } else if (type === 'expense') {
-      account.balance -= amount;
+      await Account.findByIdAndUpdate(accountId, { $inc: { balance: -amount } });
     } else if (type === 'transfer' && toAccountId) {
-      // Handle transfer
-      account.balance -= amount;
-      
-      const toAccount = await Account.findOne({ _id: toAccountId, userId: req.user.id });
-      if (toAccount) {
-        toAccount.balance += amount;
-        await toAccount.save();
-        
-        // Create corresponding transfer_in transaction
-        await Transaction.create({
-          userId: req.user.id,
-          accountId: toAccountId,
-          type: 'transfer',
-          amount,
-          category: 'Transfer',
-          division,
-          description: `Transfer from ${account.name}`,
-          date: date || new Date(),
-          toAccountId: accountId,
-          transferType: 'transfer_in'
-        });
-      }
+      // Source account: decrease balance
+      await Account.findByIdAndUpdate(accountId, { $inc: { balance: -amount } });
+      // Destination account: increase balance
+      await Account.findByIdAndUpdate(toAccountId, { $inc: { balance: amount } });
     }
-
-    await account.save();
 
     res.status(201).json({
       success: true,
@@ -78,11 +58,11 @@ exports.createTransaction = async (req, res, next) => {
 // @access  Private
 exports.getTransactions = async (req, res, next) => {
   try {
-    const { 
-      type, 
-      category, 
-      division, 
-      startDate, 
+    const {
+      type,
+      category,
+      division,
+      startDate,
       endDate,
       accountId,
       page = 1,
@@ -96,7 +76,7 @@ exports.getTransactions = async (req, res, next) => {
     if (category) query.category = category;
     if (division) query.division = division;
     if (accountId) query.accountId = accountId;
-    
+
     if (startDate || endDate) {
       query.date = {};
       if (startDate) query.date.$gte = new Date(startDate);
@@ -176,35 +156,57 @@ exports.updateTransaction = async (req, res, next) => {
       });
     }
 
-    // Store old values for balance adjustment
-    const oldAmount = transaction.amount;
-    const oldType = transaction.type;
+    // 1. REVERSE OLD TRANSACTION IMPACT
+    if (transaction.type === 'income') {
+      await Account.findByIdAndUpdate(transaction.accountId, { $inc: { balance: -transaction.amount } });
+    } else if (transaction.type === 'expense') {
+      await Account.findByIdAndUpdate(transaction.accountId, { $inc: { balance: transaction.amount } });
+    } else if (transaction.type === 'transfer') {
+      // Revert source
+      await Account.findByIdAndUpdate(transaction.accountId, { $inc: { balance: transaction.amount } });
+      // Revert destination
+      if (transaction.toAccountId) {
+        await Account.findByIdAndUpdate(transaction.toAccountId, { $inc: { balance: -transaction.amount } });
+      }
+    }
 
-    // Update transaction
+    // 2. CLEAN UP PAYLOAD
+    const updateData = { ...req.body };
+
+    // If it's not a transfer, ensure transfer-specific fields are explicitly cleared
+    if (updateData.type !== 'transfer') {
+      updateData.toAccountId = null;
+      updateData.transferType = null;
+    } else {
+      // It is a transfer
+      if (updateData.toAccountId === '') {
+        updateData.toAccountId = null;
+        updateData.transferType = null;
+      } else {
+        updateData.transferType = 'transfer_out';
+      }
+      if (!updateData.category || updateData.category === '') {
+        updateData.category = 'Transfer';
+      }
+    }
+
+    // 3. UPDATE TRANSACTION
     transaction = await Transaction.findByIdAndUpdate(
       req.params.id,
-      req.body,
+      updateData,
       { new: true, runValidators: true }
     );
 
-    // Adjust account balance
-    const account = await Account.findById(transaction.accountId);
-    if (account) {
-      // Reverse old transaction
-      if (oldType === 'income') {
-        account.balance -= oldAmount;
-      } else if (oldType === 'expense') {
-        account.balance += oldAmount;
-      }
-
-      // Apply new transaction
-      if (transaction.type === 'income') {
-        account.balance += transaction.amount;
-      } else if (transaction.type === 'expense') {
-        account.balance -= transaction.amount;
-      }
-
-      await account.save();
+    // 4. APPLY NEW TRANSACTION IMPACT
+    if (transaction.type === 'income') {
+      await Account.findByIdAndUpdate(transaction.accountId, { $inc: { balance: transaction.amount } });
+    } else if (transaction.type === 'expense') {
+      await Account.findByIdAndUpdate(transaction.accountId, { $inc: { balance: -transaction.amount } });
+    } else if (transaction.type === 'transfer' && transaction.toAccountId) {
+      // Apply source
+      await Account.findByIdAndUpdate(transaction.accountId, { $inc: { balance: -transaction.amount } });
+      // Apply destination
+      await Account.findByIdAndUpdate(transaction.toAccountId, { $inc: { balance: transaction.amount } });
     }
 
     res.status(200).json({
@@ -241,15 +243,18 @@ exports.deleteTransaction = async (req, res, next) => {
       });
     }
 
-    // Adjust account balance
-    const account = await Account.findById(transaction.accountId);
-    if (account) {
-      if (transaction.type === 'income') {
-        account.balance -= transaction.amount;
-      } else if (transaction.type === 'expense') {
-        account.balance += transaction.amount;
+    // Revert account balance atomically using $inc
+    if (transaction.type === 'income') {
+      await Account.findByIdAndUpdate(transaction.accountId, { $inc: { balance: -transaction.amount } });
+    } else if (transaction.type === 'expense') {
+      await Account.findByIdAndUpdate(transaction.accountId, { $inc: { balance: transaction.amount } });
+    } else if (transaction.type === 'transfer') {
+      // Revert source
+      await Account.findByIdAndUpdate(transaction.accountId, { $inc: { balance: transaction.amount } });
+      // Revert destination
+      if (transaction.toAccountId) {
+        await Account.findByIdAndUpdate(transaction.toAccountId, { $inc: { balance: -transaction.amount } });
       }
-      await account.save();
     }
 
     await transaction.deleteOne();

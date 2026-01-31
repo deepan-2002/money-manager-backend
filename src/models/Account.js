@@ -20,6 +20,10 @@ const accountSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  openingBalance: {
+    type: Number,
+    default: 0
+  },
   currency: {
     type: String,
     default: 'INR'

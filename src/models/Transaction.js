@@ -24,7 +24,7 @@ const transactionSchema = new mongoose.Schema({
   },
   category: {
     type: String,
-    required: [true, 'Category is required'],
+    required: function () { return this.type !== 'transfer'; },
     trim: true
   },
   division: {
@@ -56,7 +56,7 @@ const transactionSchema = new mongoose.Schema({
 });
 
 // Virtual field to check if transaction is editable (within 12 hours)
-transactionSchema.virtual('isEditable').get(function() {
+transactionSchema.virtual('isEditable').get(function () {
   const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000);
   return this.createdAt > twelveHoursAgo;
 });

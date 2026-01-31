@@ -4,7 +4,9 @@ const {
   getAccounts,
   getAccount,
   updateAccount,
-  deleteAccount
+  deleteAccount,
+  getAccountTransactions,
+  recalibrateAccount
 } = require('../controllers/accountController');
 const { protect } = require('../middleware/auth');
 
@@ -15,6 +17,9 @@ router.use(protect);
 router.route('/')
   .get(getAccounts)
   .post(createAccount);
+
+router.get('/:id/transactions', getAccountTransactions);
+router.post('/:id/recalibrate', recalibrateAccount);
 
 router.route('/:id')
   .get(getAccount)
